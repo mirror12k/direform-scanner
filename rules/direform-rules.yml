@@ -1,0 +1,350 @@
+# possible other rules:
+# - s3 bucket -> secure transport
+# - rds -> encrypt at rest
+# - ebs -> encrypt at rest
+# - vpc -> flow logs
+rules:
+  - id: direform.s3.static-bucket-name
+    pattern: |
+        resource "aws_s3_bucket" "..." {
+            bucket = "..."
+        }
+    message:  Staticly named buckets are vulnerable to name squatting. 
+    languages: [terraform]
+    severity: WARNING
+  - id: direform.s3.bucket-force-destroy
+    pattern: |
+        resource "aws_s3_bucket" "..." {
+            force_destroy = true
+        }
+    message:  Buckets should not be set to force_destroy or important data might be lost without backup.
+    languages: [terraform]
+    severity: WARNING
+  - id: direform.s3.bucket-without-logging
+    patterns:
+      - pattern: |
+          resource "aws_s3_bucket" "$BUCKET" {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_s3_bucket_logging" "..." {
+            target_bucket = aws_s3_bucket.$BUCKET.id
+          }
+          ...
+          resource "aws_s3_bucket" "$BUCKET" {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_s3_bucket" "$BUCKET" {
+            ...
+          }
+          resource "aws_s3_bucket_logging" "..." {
+            target_bucket = aws_s3_bucket.$BUCKET.id
+          }
+      - pattern-not-inside: |
+          resource "aws_s3_bucket_logging" "..." {
+            bucket = aws_s3_bucket.$BUCKET.id
+          }
+          ...
+          resource "aws_s3_bucket" "$BUCKET" {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_s3_bucket" "$BUCKET" {
+            ...
+          }
+          ...
+          resource "aws_s3_bucket_logging" "..." {
+            bucket = aws_s3_bucket.$BUCKET.id
+          }
+    message: S3 bucket resource is missing an associated 'aws_s3_bucket_logging' resource.
+    languages: [terraform]
+    severity: ERROR
+  - id: direform.s3.bucket-public-access-block-unsafe
+    languages: [terraform]
+    message: "S3 bucket public access block resource has unsafe configuration with false values."
+    severity: WARNING
+    pattern-either:
+      - pattern: |
+          resource "aws_s3_bucket_public_access_block" $BLOCK {
+            block_public_acls = false
+          }
+      - pattern: |
+          resource "aws_s3_bucket_public_access_block" $BLOCK {
+            ignore_public_acls = false
+          }
+      - pattern: |
+          resource "aws_s3_bucket_public_access_block" $BLOCK {
+            block_public_policy = false
+          }
+      - pattern: |
+          resource "aws_s3_bucket_public_access_block" $BLOCK {
+            restrict_public_buckets = false
+          }
+  - id: direform.ssl.insecure-tls-ssl-usage
+    patterns:
+      - pattern: |
+          "..."
+      - pattern-regex: |
+          "TLSv1.1"|"TLSv1"|"SSLv3"|
+    message: Insecure TLS/SSL version detected. Consider using TLSv1.2 or higher.
+    languages: [terraform]
+    severity: ERROR
+  - id: direform.apigateway.stage-missing-access-log-settings
+    languages: [terraform]
+    message: aws_apigatewayv2_stage resource lacks access_log_settings. Make sure your API gateway has access logging enabled.
+    severity: ERROR
+    patterns:
+      - pattern-inside: |
+          resource "aws_apigatewayv2_stage" $STAGE {
+            ...
+          }
+      - pattern-not: |
+          resource "aws_apigatewayv2_stage" $STAGE {
+            access_log_settings {
+              ...
+            }
+          }
+  - id: direform.terraform.insecure-local-backend
+    pattern: |
+        terraform {
+            backend "local" {}
+        }
+    message: The local backend stores configurations insecurely in local. Use the backend "s3" instead for secure persistent storage.
+    languages: [terraform]
+    severity: ERROR
+  - id: direform.s3.bucket-missing-encryption-configuration
+    patterns:
+      - pattern: |
+          resource "aws_s3_bucket" $BUCKET {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_s3_bucket" $BUCKET {
+            server_side_encryption_configuration {
+              rule {
+                apply_server_side_encryption_by_default {}
+              }
+            }
+          }
+    message: S3 bucket is missing default encryption configuration.
+    languages: [terraform]
+    severity: ERROR
+  - id: direform.sqs.missing-encryption-key
+    patterns:
+      - pattern: |
+          resource "aws_sqs_queue" "..." {
+              ...
+          }
+      - pattern-not-inside: |
+          resource "aws_sqs_queue" "..." {
+              kms_master_key_id = $THING
+          }
+    message: Add a kms_master_key_id to the sqs queue to ensure messages are encrypted securely at rest.
+    languages: [terraform]
+    severity: ERROR
+  - id: direform.sqs.missing-dlq-alarm
+    patterns:
+      - pattern: |
+          resource "aws_sqs_queue" "$DLQ" {
+          }
+      - pattern-either:
+          - pattern-inside: |
+              resource "aws_sqs_queue" "..." {
+                redrive_policy = jsonencode({
+                  deadLetterTargetArn = aws_sqs_queue.$DLQ.$ETC
+                })
+              }
+              ...
+              resource "aws_sqs_queue" "$DLQ" {}
+          - pattern-inside: |
+              resource "aws_sqs_queue" "$DLQ" {
+              }
+              ...
+              resource "aws_sqs_queue" "..." {
+                redrive_policy = jsonencode({
+                  deadLetterTargetArn = aws_sqs_queue.$DLQ.$ETC
+                })
+              }
+      - pattern-not-inside: |
+          resource "aws_sqs_queue" "$DLQ" {}
+          ...
+          resource "aws_cloudwatch_metric_alarm" "..." {
+            dimensions = {
+              QueueName = aws_sqs_queue.$DLQ.$MOREETC
+            }
+          }
+      - pattern-not-inside: |
+          resource "aws_cloudwatch_metric_alarm" "..." {
+            dimensions = {
+              QueueName = aws_sqs_queue.$DLQ.$MOREETC
+            }
+          }
+          ...
+          resource "aws_sqs_queue" "$DLQ" {}
+    message: DLQs should have an alarm in place to alert when messages are dlq'd.
+    languages:
+      - terraform
+    severity: ERROR
+  - id: direform.sqs.missing-dlq
+    patterns:
+      - pattern: |
+          resource "aws_sqs_queue" "..." {
+          }
+      - pattern-not-inside: |
+          resource "aws_sqs_queue" "..." {
+            redrive_policy = jsonencode({
+              deadLetterTargetArn = aws_sqs_queue.$DLQ.$ETC
+            })
+          }
+          ...
+          resource "aws_sqs_queue" "$DLQ" {}
+      - pattern-not-inside: |
+          resource "aws_sqs_queue" "$DLQ" {
+          }
+          ...
+          resource "aws_sqs_queue" "..." {
+            redrive_policy = jsonencode({
+              deadLetterTargetArn = aws_sqs_queue.$DLQ.$ETC
+            })
+          }
+      - pattern-not-inside: |
+          resource "aws_sqs_queue" "..." {
+            redrive_policy = jsonencode({
+              deadLetterTargetArn = ...
+            })
+          }
+    message: Any standard SQS queue should have an associated DLQ.
+    languages:
+      - terraform
+    severity: ERROR
+  - id: direform.cloudwatch.log-group-retention-insufficient
+    languages: [terraform]
+    message: CloudWatch Log Group should have a `retention_in_days` set to at least 365 days (1 year).
+    severity: ERROR
+    metadata:
+      category: best-practice
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html
+    patterns:
+      - pattern: |
+          resource "aws_cloudwatch_log_group" $X {
+            retention_in_days = $DAYS
+          }
+      - metavariable-comparison:
+          comparison: $DAYS < 365
+          metavariable: $DAYS
+  - id: direform.cloudwatch.log-group-retention-missing
+    languages: [terraform]
+    message: CloudWatch Log Group must have a `retention_in_days` set to at least 365 days (1 year).
+    severity: ERROR
+    metadata:
+      category: best-practice
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html
+    patterns:
+      - pattern: |
+          resource "aws_cloudwatch_log_group" $X {}
+      - pattern-not-inside: |
+          resource "aws_cloudwatch_log_group" $X {
+            retention_in_days = $DAYS
+            ...
+          }
+  - id: direform.cloudwatch.log-group-lacks-kms-encryption
+    languages: [terraform]
+    message: CloudWatch Log Group must be encrypted with a KMS key.
+    severity: ERROR
+    metadata:
+      category: security
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-log-data-kms.html
+    patterns:
+      - pattern: |
+          resource "aws_cloudwatch_log_group" $X {}
+      - pattern-not-inside: |
+          resource "aws_cloudwatch_log_group" $X {
+            kms_key_id = ...
+          }
+  - id: direform.secretsmanager.secret-lacks-kms-key
+    languages: [terraform]
+    message: Secrets Manager secrets must specify a customer-managed AWS KMS key for encryption.
+    severity: ERROR
+    metadata:
+      category: security
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/secretsmanager/latest/userguide/encrypting-secrets.html
+    patterns:
+      - pattern: |
+          resource "aws_secretsmanager_secret" $X {}
+      - pattern-not-inside: |
+          resource "aws_secretsmanager_secret" $X {
+            kms_key_id = ...
+          }
+  - id: direform.secretsmanager.secret-rotation-disabled
+    languages: [terraform]
+    message: Secrets Manager secret must have rotation enabled.
+    severity: ERROR
+    metadata:
+      category: best-practice
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotating-secrets.html
+    patterns:
+      - pattern: |
+          resource "aws_secretsmanager_secret" "$SECRET" {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_secretsmanager_secret_rotation" "..." {
+            secret_id = aws_secretsmanager_secret.$SECRET.id
+            ...
+          }
+          ...
+          resource "aws_secretsmanager_secret" "$SECRET" {
+            ...
+          }
+      - pattern-not-inside: |
+          resource "aws_secretsmanager_secret" "$SECRET" {
+            ...
+          }
+          ...
+          resource "aws_secretsmanager_secret_rotation" "..." {
+            secret_id = aws_secretsmanager_secret.$SECRET.id
+            ...
+          }
+  - id: direform.cloudwatch.alarm-without-action
+    languages:
+      - terraform
+    message: CloudWatch alarm must have an action attached for notifications.
+    severity: ERROR
+    metadata:
+      category: best-practice
+      technology:
+        - aws
+      references:
+        - https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/US_AlarmAtions.html
+    pattern-either:
+      - patterns:
+        - pattern: |
+            resource "aws_cloudwatch_metric_alarm" "$ALARM" {
+              ...
+            }
+        - pattern-not-inside: |
+            resource "aws_cloudwatch_metric_alarm" "$ALARM" {
+              alarm_actions = [...]
+              ...
+            }
+      - pattern: |
+          resource "aws_cloudwatch_metric_alarm" "$ALARM" {
+            alarm_actions = []
+          }
+
